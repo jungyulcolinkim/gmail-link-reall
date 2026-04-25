@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gmail 앱으로 이동 중...</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", sans-serif;
+    background: #0f172a;
+    color: #f8fafc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    margin: 0;
+    text-align: center;
+  }
+  .box { padding: 24px; }
+  .emoji { font-size: 48px; margin-bottom: 16px; }
+  .msg { font-size: 18px; font-weight: 600; }
+  .sub { font-size: 14px; color: #94a3b8; margin-top: 8px; }
+  a { color: #60a5fa; }
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="emoji">📧</div>
+  <div class="msg">Gmail 앱으로 이동 중...</div>
+  <div class="sub">자동으로 이동되지 않으면 <a href="https://mail.google.com/mail/u/0/#drafts">여기를 눌러주세요</a></div>
+</div>
+<script>
+  (function() {
+    var ua = navigator.userAgent || navigator.vendor || window.opera;
+    var isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+    var isAndroid = /android/i.test(ua);
+
+    if (isIOS) {
+      // iOS Gmail 앱 URL 스킴
+      window.location.replace("googlegmail://");
+      // 폴백: 1.5초 후에도 페이지가 살아있으면 웹 Gmail로
+      setTimeout(function() {
+        window.location.replace("https://mail.google.com/mail/u/0/#drafts");
+      }, 1500);
+    } else if (isAndroid) {
+      // Android Intent URL — Gmail 앱 직접 호출
+      window.location.replace(
+        "intent://mail.google.com/mail/u/0/#Intent;scheme=https;package=com.google.android.gm;end"
+      );
+      setTimeout(function() {
+        window.location.replace("https://mail.google.com/mail/u/0/#drafts");
+      }, 1500);
+    } else {
+      // 데스크톱 / 기타: 웹 Gmail
+      window.location.replace("https://mail.google.com/mail/u/0/#drafts");
+    }
+  })();
+</script>
+</body>
+</html>
