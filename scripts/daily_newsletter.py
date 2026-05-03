@@ -41,8 +41,10 @@ CATEGORY_DEFS = [
         'title': '🌐 국내외 뉴스',
         'color': '#1a73e8',
         'queries': [
-            '한국 정치 사회 주요 뉴스',
-            '전쟁 외교 정상회담 국제 분쟁',
+            ('한국 정치', 'ko'),
+            ('한국 사회', 'ko'),
+            ('전쟁 외교', 'ko'),
+            ('우크라이나 가자 중동', 'ko'),
         ],
     },
     {
@@ -50,7 +52,10 @@ CATEGORY_DEFS = [
         'title': '💻 IT / 테크',
         'color': '#10b981',
         'queries': [
-            '빅테크 반도체 신기술 사이버보안',
+            ('빅테크 반도체', 'ko'),
+            ('IT 신기술', 'ko'),
+            ('big tech news', 'en'),
+            ('semiconductor chip', 'en'),
         ],
     },
     {
@@ -58,7 +63,10 @@ CATEGORY_DEFS = [
         'title': '🤖 AI',
         'color': '#8b5cf6',
         'queries': [
-            'Claude Anthropic ChatGPT OpenAI Gemini AI 모델',
+            ('AI 인공지능', 'ko'),
+            ('Claude Anthropic', 'en'),
+            ('ChatGPT OpenAI', 'en'),
+            ('Gemini Google AI', 'en'),
         ],
     },
     {
@@ -66,14 +74,19 @@ CATEGORY_DEFS = [
         'title': '💰 금융 / 경제',
         'color': '#f59e0b',
         'queries': [
-            '환율 국제유가 WTI 코스피 Fed 금리',
+            ('환율 코스피', 'ko'),
+            ('국제유가 WTI', 'ko'),
+            ('Fed 금리 미국 증시', 'ko'),
+            ('oil price stock market', 'en'),
         ],
     },
 ]
 
 
-def google_news_rss_url(query: str) -> str:
-    """한국어 Google News RSS URL을 만든다."""
+def google_news_rss_url(query: str, lang: str = 'ko') -> str:
+    """Google News RSS URL을 만든다 (lang='ko' 또는 'en')."""
+    if lang == 'en':
+        return f'https://news.google.com/rss/search?q={quote(query)}&hl=en-US&gl=US&ceid=US:en'
     return f'https://news.google.com/rss/search?q={quote(query)}&hl=ko&gl=KR&ceid=KR:ko'
 
 
@@ -131,8 +144,8 @@ def collect_candidates() -> list[dict]:
     result = []
     for cat in CATEGORY_DEFS:
         all_items = []
-        for q in cat['queries']:
-            url = google_news_rss_url(q)
+        for q, lang in cat['queries']:
+            url = google_news_rss_url(q, lang)
             items = fetch_rss_items(url)
             all_items.extend(items)
 
@@ -195,11 +208,15 @@ def curate_news() -> dict:
 # 절대 규칙 (위반 = 작업 실패)
 1. **title / source / date / url 은 위 후보 데이터에서 글자 그대로 복사**. 한 글자도 수정/생성 금지.
 2. **summary 만 너가 한국어로 새로 작성** (50~120자, 1~2줄, 핵심만 간결히).
-3. 후보가 3건 미만인 카테고리는 있는 만큼만. 0건이면 `"items": []`.
-4. 모든 4개 카테고리(domestic, tech, ai, finance)를 정의된 순서대로 출력.
-5. JSON 한 덩어리만 출력. 다른 설명/코드 펜스/사과문 금지.
-6. 가십, 광고, 자극적 제목 우선순위 낮춤. 영향력 있는 사건 우선.
-7. 같은 사건 후속 보도가 한 카테고리에 몰리지 않게 분산.
+3. **후보가 3건 이상인 카테고리는 반드시 정확히 3건 선정**. 거르지 말 것.
+4. 후보가 1~2건뿐이면 있는 만큼만 출력. 후보가 정말 0건이어야만 `"items": []`.
+5. 모든 4개 카테고리(domestic, tech, ai, finance)를 정의된 순서대로 출력.
+6. JSON 한 덩어리만 출력. 다른 설명/코드 펜스/사과문 금지.
+7. 같은 사건 후속 보도가 한 카테고리에 몰리지 않게 분산. 분산 후에도 3건은 채울 것.
+
+# 선정 기준 (참고용, 거르는 용도 X)
+- 후보가 다 비슷비슷하면 그냥 가장 최신 3개 선택
+- 거르는 게 망설여지면 무조건 포함 (기준이 모호하면 포함 쪽으로)
 
 # 출력 JSON 스키마
 
