@@ -241,7 +241,7 @@ def curate_news() -> dict:
     print('Calling Claude (Haiku) for curation…', flush=True)
     response = client.messages.create(
         model='claude-haiku-4-5-20251001',  # web_search 안 쓰니 Haiku로 충분
-        max_tokens=3500,
+        max_tokens=6000,
         messages=[{'role': 'user', 'content': prompt}],
     )
     print(f'  stop_reason={response.stop_reason}', flush=True)
