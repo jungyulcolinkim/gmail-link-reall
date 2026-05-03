@@ -39,10 +39,21 @@ def today_iso() -> str:
 CURATION_PROMPT_TEMPLATE = """너는 매일 아침 한국어 뉴스레터를 작성하는 큐레이터다. 오늘은 {today_kor} (오늘 = {today_iso}).
 
 # 작업 흐름
-1. web_search 도구로 각 카테고리에 해당하는 뉴스를 검색한다 (검색어에 "{today_iso}", "오늘", "최근" 키워드 활용).
-2. 각 검색 결과의 발행일자를 추정한다 (아래 "날짜 추정 규칙" 참고).
-3. 가능한 한 최근 기사를 우선 선정하고, JSON을 구성한다.
-4. **마지막 응답에는 무조건 JSON 한 덩어리만** 출력한다. 어떤 경우에도 JSON 출력을 거부하지 말 것.
+1. web_search는 최대 8회 사용 가능. 카테고리당 1~2회 효율적으로 검색.
+   - 좋은 검색어 예: "오늘 한국 주요 뉴스 {today_iso}", "AI 모델 업데이트 최근", "WTI 유가 환율 오늘"
+   - 나쁜 검색어: "뉴스" (너무 광범위), 같은 키워드 반복
+2. **검색 결과 외 정보는 절대 사용 금지** (자세한 규칙은 아래 "환각 금지" 참고).
+3. 각 검색 결과의 발행일자를 추정한다 (아래 "날짜 추정 규칙" 참고).
+4. 가능한 한 최근 기사를 우선 선정하고, JSON을 구성한다.
+5. **마지막 응답에는 무조건 JSON 한 덩어리만** 출력한다.
+
+# 🚫 환각 금지 (가장 중요)
+
+- `url` 필드: **web_search 결과에 실제로 등장한 URL을 그대로 복사**해 넣어라. 절대 추측하거나 변형하지 말 것. URL을 못 본 기사는 사용 금지.
+- `title` 필드: 검색 결과 제목을 거의 그대로 사용 (요약 시 의미 변경 X).
+- `date` 필드: 검색 결과에 명시된 날짜만 사용. 추측하지 말 것.
+- `source` 필드: 검색 결과에 표시된 매체명만 사용.
+- 작년·옛날 기사 (예: 1월, 4월 9일 등 {three_days_ago} 이전)는 검색 결과에 나와도 **절대 사용 금지**. 카테고리가 비더라도 옛날 기사로 채우는 것보다 빈 게 낫다.
 
 # 카테고리 (각 3건씩, 총 12건이 이상적)
 
@@ -111,7 +122,7 @@ def curate_news() -> dict:
     )
     print('Calling Claude API with web_search…', flush=True)
     response = client.messages.create(
-        model='claude-haiku-4-5-20251001',
+        model='claude-sonnet-4-5-20250929',
         max_tokens=6000,
         tools=[{
             'type': 'web_search_20250305',
@@ -279,6 +290,9 @@ def refresh_kakao_token() -> tuple[str, str | None]:
 def send_kakao(message: str) -> None:
     access_token, _ = refresh_kakao_token()
 
+    # 카카오 text 템플릿은 link 필드가 필수.
+    # button_title 을 생략하면 버튼이 표시되지 않아 깔끔한 알림이 됨.
+    # link.web_url 은 카카오 콘솔에 등록된 도메인이어야 함.
     template_object = {
         'object_type': 'text',
         'text': message,
@@ -286,7 +300,6 @@ def send_kakao(message: str) -> None:
             'web_url': 'https://jungyulcolinkim.github.io/Gmail-Landing/',
             'mobile_web_url': 'https://jungyulcolinkim.github.io/Gmail-Landing/',
         },
-        'button_title': '지메일 열기',
     }
 
     print('Sending KakaoTalk message…', flush=True)
@@ -352,7 +365,7 @@ def main() -> int:
     # 4. 카카오톡 발송
     kakao_ok = False
     try:
-        kakao_msg = '☀️ 오늘의 뉴스레터가 도착했어요!\n\n📧 지메일 앱에서 확인하세요'
+        kakao_msg = '☀️ 오늘의 뉴스레터가 도착했어요!\n\n📧 지메일 앱을 열어 확인해주세요.'
         send_kakao(kakao_msg)
         kakao_ok = True
     except Exception as e:
