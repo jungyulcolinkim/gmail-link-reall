@@ -111,12 +111,12 @@ def curate_news() -> dict:
     )
     print('Calling Claude API with web_search…', flush=True)
     response = client.messages.create(
-        model='claude-sonnet-4-5-20250929',
-        max_tokens=8000,
+        model='claude-haiku-4-5-20251001',
+        max_tokens=6000,
         tools=[{
             'type': 'web_search_20250305',
             'name': 'web_search',
-            'max_uses': 15,
+            'max_uses': 8,
         }],
         messages=[{'role': 'user', 'content': prompt}],
     )
