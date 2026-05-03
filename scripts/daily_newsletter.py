@@ -24,19 +24,26 @@ def kst_today_kor() -> str:
     return f"{now.year}년 {now.month:02d}월 {now.day:02d}일 ({WEEKDAYS[now.weekday()]})"
 
 
-def two_days_ago_iso() -> str:
-    return (datetime.now(KST) - timedelta(days=2)).strftime('%Y-%m-%d')
+def three_days_ago_iso() -> str:
+    return (datetime.now(KST) - timedelta(days=3)).strftime('%Y-%m-%d')
+
+
+def today_iso() -> str:
+    return datetime.now(KST).strftime('%Y-%m-%d')
 
 
 # ----------------------------------------------------------------------------
 # 1) Claude API + web_search 로 뉴스 큐레이션 → JSON
 # ----------------------------------------------------------------------------
 
-CURATION_PROMPT_TEMPLATE = """너는 매일 아침 한국어 뉴스레터를 작성하는 큐레이터다. 오늘은 {today_kor}.
+CURATION_PROMPT_TEMPLATE = """너는 매일 아침 한국어 뉴스레터를 작성하는 큐레이터다. 오늘은 {today_kor} (오늘 = {today_iso}).
 
 # 작업 흐름
-1. web_search 도구로 4개 카테고리 뉴스를 적극 검색한다.
-2. 검증 단계 후, **마지막 응답에 JSON 한 덩어리만** 출력한다 (다른 설명·코드 펜스 금지).
+1. web_search 도구로 각 카테고리에 해당하는 뉴스를 검색한다 (검색어에 "오늘", "{today_iso}", "최근" 같은 키워드 적극 활용).
+2. **각 검색 결과의 발행일자를 반드시 확인**한다. 검색 결과 스니펫이나 본문에서 날짜를 추출하지 못하면 그 기사는 사용하지 않는다.
+3. 발행일이 **{three_days_ago} 이상 {today_iso} 이하** 범위 안에 있는 기사만 후보로 선정한다.
+4. 검증 통과한 기사로 JSON을 구성한다.
+5. 마지막 응답엔 **JSON 한 덩어리만** 출력한다 (다른 설명·코드 펜스 금지).
 
 # 카테고리 (각 3건씩, 총 12건)
 
@@ -45,17 +52,29 @@ CURATION_PROMPT_TEMPLATE = """너는 매일 아침 한국어 뉴스레터를 작
 🤖 AI — **Claude(Anthropic), ChatGPT/OpenAI, Gemini/Google AI 모델 업데이트는 반드시 1건 이상**, 그 외 AI 스타트업/정책/한국 AI 동향
 💰 금융/경제 — 국제유가(WTI/브렌트), 환율(원/달러·엔/달러), 미국·한국 증시, Fed/한국은행 금리
 
-# 절대 규칙
-1. **{two_days_ago} 이후 발행 뉴스만 허용** (최근 48시간 이내). 발행일 모르면 제외.
-2. **공신력 있는 매체만 허용**:
-   - 국내: 연합뉴스, 조선일보, 중앙일보, 동아일보, 한겨레, 경향신문, 한국일보, 국민일보, 서울신문, KBS, MBC, SBS, JTBC, YTN, MBN, 채널A, TV조선, 매일경제, 한국경제, 머니투데이, 이데일리, 파이낸셜뉴스, 서울경제, 헤럴드경제, 디지털타임스, 전자신문, 블로터, IT조선, 지디넷코리아
-   - 글로벌: Reuters, Bloomberg, AP, AFP, BBC, NHK, Al Jazeera, FT, WSJ, NYT, Washington Post, The Guardian, The Economist, CNN, CNBC, Nikkei, TechCrunch, The Verge, Wired, Ars Technica, MIT Technology Review
-   - AI 1차 출처: Anthropic blog, OpenAI blog, Google AI/DeepMind blog, Microsoft AI blog, Meta AI blog
-   - **금지**: 개인 블로그, 네이버 블로그/카페, 티스토리, 광고성 보도자료, 출처 모를 사이트
-3. 한 카테고리 안에 동일 사건의 후속 보도가 몰리지 않게 분산.
-4. 한국어 1~2줄 요약 (50~120자).
+# 절대 규칙 (위반 시 기사 폐기)
+
+## 1. 날짜 검증 (가장 중요!)
+- **허용 범위**: {three_days_ago} ~ {today_iso} (3일 이내 발행)
+- 검색 결과에 "X일 전", "어제", "오늘" 같은 상대 표기만 있고 절대 날짜를 확인할 수 없으면 → **사용 금지**
+- 검색 결과에 발행일이 명시되지 않으면 → **사용 금지**
+- 발행일이 {three_days_ago} 이전이면 → **사용 금지** (4월 기사, 작년 기사 등 절대 포함 금지)
+- "Updated" 표시가 있고 원래 발행일이 오래된 기사 → **사용 금지** (재탕 기사 거름)
+
+## 2. 매체 검증
+**허용 매체만 사용**:
+- 국내: 연합뉴스, 조선일보, 중앙일보, 동아일보, 한겨레, 경향신문, 한국일보, 국민일보, 서울신문, KBS, MBC, SBS, JTBC, YTN, MBN, 채널A, TV조선, 매일경제, 한국경제, 머니투데이, 이데일리, 파이낸셜뉴스, 서울경제, 헤럴드경제, 디지털타임스, 전자신문, 블로터, IT조선, 지디넷코리아
+- 글로벌: Reuters, Bloomberg, AP, AFP, BBC, NHK, Al Jazeera, FT, WSJ, NYT, Washington Post, The Guardian, The Economist, CNN, CNBC, Nikkei, TechCrunch, The Verge, Wired, Ars Technica, MIT Technology Review
+- AI 1차 출처: Anthropic blog, OpenAI blog, Google AI/DeepMind blog, Microsoft AI blog, Meta AI blog
+- **금지**: 개인 블로그, 네이버 블로그/카페, 티스토리, 광고성 보도자료, 출처 모를 사이트
+
+## 3. 다양성
+- 한 카테고리 안에 동일 사건의 후속 보도가 몰리지 않게 분산
+- 한국어 1~2줄 요약 (50~120자)
 
 # 출력 JSON 스키마
+
+각 item의 `date` 필드는 **YYYY-MM-DD 형식**으로 정확히 적어라 (예: "{today_iso}"). MM/DD 같은 축약 금지.
 
 {{
   "categories": [
@@ -64,7 +83,7 @@ CURATION_PROMPT_TEMPLATE = """너는 매일 아침 한국어 뉴스레터를 작
       "title": "🌐 국내외 뉴스",
       "color": "#1a73e8",
       "items": [
-        {{"title": "...", "summary": "...", "source": "...", "date": "MM/DD", "url": "..."}}
+        {{"title": "...", "summary": "...", "source": "...", "date": "YYYY-MM-DD", "url": "..."}}
       ]
     }},
     {{"key": "tech", "title": "💻 IT / 테크", "color": "#10b981", "items": [...]}},
@@ -73,7 +92,13 @@ CURATION_PROMPT_TEMPLATE = """너는 매일 아침 한국어 뉴스레터를 작
   ]
 }}
 
-검색을 충분히 한 뒤, **마지막 메시지에는 위 JSON만** 출력해라.
+# 최종 자체 검증 (JSON 출력 전 반드시!)
+JSON을 만든 직후, 출력 전에 머릿속으로 다음을 확인한다:
+- [ ] 모든 item의 `date`가 {three_days_ago} ~ {today_iso} 범위 안에 있는가?
+- [ ] 발행일이 의심스러운 기사가 1개라도 있으면, 그 기사를 빼고 같은 카테고리에서 다른 날짜 검증된 기사로 대체했는가?
+- [ ] 모든 item의 `source`가 위 허용 매체 목록에 있는가?
+
+위 검증을 통과해야만 JSON을 출력한다. 검색을 충분히 한 뒤, **마지막 메시지에는 위 JSON만** 출력해라.
 """
 
 
@@ -81,7 +106,8 @@ def curate_news() -> dict:
     client = anthropic.Anthropic()
     prompt = CURATION_PROMPT_TEMPLATE.format(
         today_kor=kst_today_kor(),
-        two_days_ago=two_days_ago_iso(),
+        today_iso=today_iso(),
+        three_days_ago=three_days_ago_iso(),
     )
     print('Calling Claude API with web_search…', flush=True)
     response = client.messages.create(
@@ -292,6 +318,24 @@ def main() -> int:
     except Exception as e:
         print(f'  ❌ 뉴스 큐레이션 실패: {e}', flush=True)
         return 1
+
+    # 1-b. 날짜 범위 검증 (3일 이내인지 안전망 체크)
+    valid_from = three_days_ago_iso()
+    valid_to = today_iso()
+    out_of_range = []
+    for cat in news_data.get('categories', []):
+        for item in cat.get('items', []):
+            d = item.get('date', '')
+            # YYYY-MM-DD 형식이어야만 비교
+            if not re.match(r'^\d{4}-\d{2}-\d{2}$', d):
+                out_of_range.append((cat.get('title', ''), item.get('title', ''), d))
+                continue
+            if d < valid_from or d > valid_to:
+                out_of_range.append((cat.get('title', ''), item.get('title', ''), d))
+    if out_of_range:
+        print(f'  ⚠️ 날짜 범위({valid_from} ~ {valid_to}) 벗어난 기사 {len(out_of_range)}건:', flush=True)
+        for cat_title, item_title, d in out_of_range:
+            print(f'     - [{cat_title}] {item_title} ({d})', flush=True)
 
     # 2. HTML 생성
     html = build_html(news_data, today_kor)
