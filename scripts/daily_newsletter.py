@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""정열님의 매일 아침 뉴스레터 — GitHub Actions에서 실행."""
+"""정열님의 매일 아침 뉴스레터 — RSS 기반 큐레이션 + Claude 요약."""
 import json
 import os
 import re
@@ -10,13 +10,16 @@ from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
+from urllib.parse import quote
 
 import anthropic
+import feedparser
 import requests
 
 # 한국 시간(KST = UTC+9)
 KST = timezone(timedelta(hours=9))
 WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
+DAYS_WINDOW = 3  # 최근 N일 이내 뉴스만
 
 
 def kst_today_kor() -> str:
@@ -24,74 +27,181 @@ def kst_today_kor() -> str:
     return f"{now.year}년 {now.month:02d}월 {now.day:02d}일 ({WEEKDAYS[now.weekday()]})"
 
 
-def three_days_ago_iso() -> str:
-    return (datetime.now(KST) - timedelta(days=3)).strftime('%Y-%m-%d')
-
-
 def today_iso() -> str:
     return datetime.now(KST).strftime('%Y-%m-%d')
 
 
 # ----------------------------------------------------------------------------
-# 1) Claude API + web_search 로 뉴스 큐레이션 → JSON
+# 1) RSS 카테고리별 검색 쿼리 정의
 # ----------------------------------------------------------------------------
 
-CURATION_PROMPT_TEMPLATE = """너는 매일 아침 한국어 뉴스레터를 작성하는 큐레이터다. 오늘은 {today_kor} (오늘 = {today_iso}).
+CATEGORY_DEFS = [
+    {
+        'key': 'domestic',
+        'title': '🌐 국내외 뉴스',
+        'color': '#1a73e8',
+        'queries': [
+            '한국 정치 사회 주요 뉴스',
+            '전쟁 외교 정상회담 국제 분쟁',
+        ],
+    },
+    {
+        'key': 'tech',
+        'title': '💻 IT / 테크',
+        'color': '#10b981',
+        'queries': [
+            '빅테크 반도체 신기술 사이버보안',
+        ],
+    },
+    {
+        'key': 'ai',
+        'title': '🤖 AI',
+        'color': '#8b5cf6',
+        'queries': [
+            'Claude Anthropic ChatGPT OpenAI Gemini AI 모델',
+        ],
+    },
+    {
+        'key': 'finance',
+        'title': '💰 금융 / 경제',
+        'color': '#f59e0b',
+        'queries': [
+            '환율 국제유가 WTI 코스피 Fed 금리',
+        ],
+    },
+]
 
-# 작업 흐름
-1. web_search는 최대 8회 사용 가능. 카테고리당 1~2회 효율적으로 검색.
-   - 좋은 검색어 예: "오늘 한국 주요 뉴스 {today_iso}", "AI 모델 업데이트 최근", "WTI 유가 환율 오늘"
-   - 나쁜 검색어: "뉴스" (너무 광범위), 같은 키워드 반복
-2. **검색 결과 외 정보는 절대 사용 금지** (자세한 규칙은 아래 "환각 금지" 참고).
-3. 각 검색 결과의 발행일자를 추정한다 (아래 "날짜 추정 규칙" 참고).
-4. 가능한 한 최근 기사를 우선 선정하고, JSON을 구성한다.
-5. **마지막 응답에는 무조건 JSON 한 덩어리만** 출력한다.
 
-# 🚫 환각 금지 (가장 중요)
+def google_news_rss_url(query: str) -> str:
+    """한국어 Google News RSS URL을 만든다."""
+    return f'https://news.google.com/rss/search?q={quote(query)}&hl=ko&gl=KR&ceid=KR:ko'
 
-- `url` 필드: **web_search 결과에 실제로 등장한 URL을 그대로 복사**해 넣어라. 절대 추측하거나 변형하지 말 것. URL을 못 본 기사는 사용 금지.
-- `title` 필드: 검색 결과 제목을 거의 그대로 사용 (요약 시 의미 변경 X).
-- `date` 필드: 검색 결과에 명시된 날짜만 사용. 추측하지 말 것.
-- `source` 필드: 검색 결과에 표시된 매체명만 사용.
-- 작년·옛날 기사 (예: 1월, 4월 9일 등 {three_days_ago} 이전)는 검색 결과에 나와도 **절대 사용 금지**. 카테고리가 비더라도 옛날 기사로 채우는 것보다 빈 게 낫다.
 
-# 카테고리 (각 3건씩, 총 12건이 이상적)
+def fetch_rss_items(url: str, max_items: int = 20) -> list[dict]:
+    """RSS 피드를 받아 표준화된 item 목록을 반환."""
+    try:
+        feed = feedparser.parse(url)
+    except Exception as e:
+        print(f'  ⚠️ RSS fetch 실패: {e}', flush=True)
+        return []
 
-🌐 국내외 뉴스 — 한국 정치/사회/외교 + 국제 주요 이슈 (전쟁/분쟁, 외교, 지정학)
-💻 IT/테크 — 빅테크 발표, 반도체, 신기술, 사이버보안
-🤖 AI — Claude(Anthropic), ChatGPT/OpenAI, Gemini/Google AI 모델 업데이트, 그 외 AI 스타트업/정책/한국 AI 동향
-💰 금융/경제 — 국제유가(WTI/브렌트), 환율(원/달러·엔/달러), 미국·한국 증시, Fed/한국은행 금리
+    items = []
+    for entry in feed.entries[:max_items]:
+        # 발행일 파싱 (RSS pubDate)
+        pub_dt = None
+        if getattr(entry, 'published_parsed', None):
+            try:
+                pub_dt = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).astimezone(KST)
+            except (ValueError, TypeError):
+                pass
+        if pub_dt is None:
+            continue  # 발행일 없으면 스킵 (안전)
 
-# 날짜 추정 규칙 (중요)
+        # 매체명 추출
+        source_name = ''
+        if hasattr(entry, 'source') and entry.source:
+            try:
+                source_name = entry.source.get('title', '') or ''
+            except AttributeError:
+                source_name = getattr(entry.source, 'title', '') or ''
+        if not source_name:
+            source_name = getattr(entry, 'author', '') or '뉴스'
 
-검색 결과에 절대 날짜(YYYY-MM-DD)가 있으면 그대로 사용한다. 없으면 다음 변환표로 추정:
+        # 요약 (HTML 태그 제거 + 길이 제한)
+        raw_summary = entry.get('summary', '') or ''
+        clean_summary = re.sub(r'<[^>]+>', '', raw_summary)
+        clean_summary = re.sub(r'\s+', ' ', clean_summary).strip()[:250]
 
-- "방금 전", "X분 전", "X시간 전" → {today_iso} (오늘)
-- "오늘", "today" → {today_iso}
-- "어제", "yesterday", "1일 전" → 어제 날짜 (오늘 - 1일)
-- "그제", "2일 전" → 오늘 - 2일
-- "3일 전" → 오늘 - 3일
-- "4일 전" 이상 또는 "1주 전" 이상 → **너무 오래됨, 사용하지 말 것**
-- 날짜 정보가 전혀 없으면 → 다른 기사를 우선 시도, 그래도 안 되면 사용 가능 (단 매체 신뢰도가 높을 때만)
+        items.append({
+            'title': entry.get('title', '').strip(),
+            'link': entry.get('link', '').strip(),
+            'summary_raw': clean_summary,
+            'source': source_name.strip(),
+            'date': pub_dt.strftime('%Y-%m-%d'),
+            'pub_dt': pub_dt,
+        })
+    return items
 
-# 우선순위
 
-1. **{three_days_ago} ~ {today_iso}** 범위(최근 3일) 기사를 최우선
-2. 위 범위에서 못 찾으면 그 카테고리에서 가장 최근 기사로 대체 (단 1주일 이상 된 건 안 됨)
-3. 매체는 가능한 한 아래 "공신력 매체" 목록 우선
+def collect_candidates() -> list[dict]:
+    """카테고리별로 RSS 모아서, 최근 N일 내 후보 목록 반환."""
+    cutoff = datetime.now(KST) - timedelta(days=DAYS_WINDOW)
+    print(f'Fetching RSS feeds (최근 {DAYS_WINDOW}일 이내)…', flush=True)
 
-# 공신력 매체 (우선 사용 권장)
+    result = []
+    for cat in CATEGORY_DEFS:
+        all_items = []
+        for q in cat['queries']:
+            url = google_news_rss_url(q)
+            items = fetch_rss_items(url)
+            all_items.extend(items)
 
-- 국내: 연합뉴스, 조선일보, 중앙일보, 동아일보, 한겨레, 경향신문, 한국일보, 국민일보, 서울신문, KBS, MBC, SBS, JTBC, YTN, MBN, 채널A, TV조선, 매일경제, 한국경제, 머니투데이, 이데일리, 파이낸셜뉴스, 서울경제, 헤럴드경제, 디지털타임스, 전자신문, 블로터, IT조선, 지디넷코리아
-- 글로벌: Reuters, Bloomberg, AP, AFP, BBC, NHK, Al Jazeera, FT, WSJ, NYT, Washington Post, The Guardian, The Economist, CNN, CNBC, Nikkei, TechCrunch, The Verge, Wired, Ars Technica, MIT Technology Review
-- AI 1차 출처: Anthropic blog, OpenAI blog, Google AI/DeepMind blog, Microsoft AI blog, Meta AI blog
-- **피하기**: 개인 블로그, 네이버 블로그/카페, 티스토리, 광고성 보도자료
+        # 3일 이내 필터
+        recent = [i for i in all_items if i['pub_dt'] >= cutoff]
 
-# 출력 형식 — 반드시 준수
+        # 제목 앞부분 기준 중복 제거 (다른 매체가 같은 사건 다룬 경우)
+        seen = set()
+        unique = []
+        for item in sorted(recent, key=lambda x: x['pub_dt'], reverse=True):
+            key = re.sub(r'\s+', ' ', item['title'])[:40]
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
 
-요약은 한국어 1~2줄 (50~120자). `date` 필드는 **YYYY-MM-DD 형식**으로 작성한다.
+        top = unique[:8]  # Claude한테 최대 8개 후보 전달
+        print(f'  {cat["title"]}: {len(top)} 후보 (전체 {len(all_items)} → 3일 이내 {len(recent)})', flush=True)
 
-**카테고리당 3건이 이상적이지만, 부족하면 부족한 대로 출력**한다. 절대 JSON 출력을 거부하거나 설명문을 추가하지 말 것. 빈 카테고리도 `"items": []` 로 채워서 보낸다.
+        result.append({
+            'key': cat['key'],
+            'title': cat['title'],
+            'color': cat['color'],
+            'candidates': top,
+        })
+    return result
+
+
+# ----------------------------------------------------------------------------
+# 2) Claude로 선정 + 한국어 요약 (web_search 없이 단순 텍스트 작업)
+# ----------------------------------------------------------------------------
+
+def curate_news() -> dict:
+    candidates = collect_candidates()
+    today_kor = kst_today_kor()
+
+    # 후보 목록을 텍스트로 직렬화
+    sections = []
+    for cat in candidates:
+        if not cat['candidates']:
+            sections.append(f"\n## {cat['title']} (후보 0건 — 빈 카테고리로 출력)\n")
+            continue
+        section = f"\n## {cat['title']} (후보 {len(cat['candidates'])}건)\n"
+        for i, item in enumerate(cat['candidates'], 1):
+            section += f"\n[후보 {i}]\n"
+            section += f"  date: {item['date']}\n"
+            section += f"  title: {item['title']}\n"
+            section += f"  source: {item['source']}\n"
+            section += f"  url: {item['link']}\n"
+            if item['summary_raw']:
+                section += f"  context: {item['summary_raw'][:180]}\n"
+        sections.append(section)
+
+    prompt = f"""너는 한국어 뉴스 큐레이터다. 오늘은 {today_kor}.
+
+아래 RSS 피드에서 자동 수집된 후보 기사들 중, 각 카테고리에서 가장 중요하고 흥미로운 **최대 3건**씩 골라 한국어 요약을 작성해 JSON으로 출력하라.
+
+{''.join(sections)}
+
+# 절대 규칙 (위반 = 작업 실패)
+1. **title / source / date / url 은 위 후보 데이터에서 글자 그대로 복사**. 한 글자도 수정/생성 금지.
+2. **summary 만 너가 한국어로 새로 작성** (50~120자, 1~2줄, 핵심만 간결히).
+3. 후보가 3건 미만인 카테고리는 있는 만큼만. 0건이면 `"items": []`.
+4. 모든 4개 카테고리(domestic, tech, ai, finance)를 정의된 순서대로 출력.
+5. JSON 한 덩어리만 출력. 다른 설명/코드 펜스/사과문 금지.
+6. 가십, 광고, 자극적 제목 우선순위 낮춤. 영향력 있는 사건 우선.
+7. 같은 사건 후속 보도가 한 카테고리에 몰리지 않게 분산.
+
+# 출력 JSON 스키마
 
 {{
   "categories": [
@@ -100,7 +210,7 @@ CURATION_PROMPT_TEMPLATE = """너는 매일 아침 한국어 뉴스레터를 작
       "title": "🌐 국내외 뉴스",
       "color": "#1a73e8",
       "items": [
-        {{"title": "...", "summary": "...", "source": "...", "date": "YYYY-MM-DD", "url": "..."}}
+        {{"title": "후보 그대로", "summary": "한국어 요약", "source": "후보 그대로", "date": "후보 그대로", "url": "후보 그대로"}}
       ]
     }},
     {{"key": "tech", "title": "💻 IT / 테크", "color": "#10b981", "items": [...]}},
@@ -108,27 +218,13 @@ CURATION_PROMPT_TEMPLATE = """너는 매일 아침 한국어 뉴스레터를 작
     {{"key": "finance", "title": "💰 금융 / 경제", "color": "#f59e0b", "items": [...]}}
   ]
 }}
-
-검색을 마친 뒤 **마지막 메시지에는 위 JSON만** 출력하라. 다른 설명, 코드 펜스, 사과문, 한계 보고 일체 금지.
 """
 
-
-def curate_news() -> dict:
     client = anthropic.Anthropic()
-    prompt = CURATION_PROMPT_TEMPLATE.format(
-        today_kor=kst_today_kor(),
-        today_iso=today_iso(),
-        three_days_ago=three_days_ago_iso(),
-    )
-    print('Calling Claude API with web_search…', flush=True)
+    print('Calling Claude (Haiku) for curation…', flush=True)
     response = client.messages.create(
-        model='claude-sonnet-4-5-20250929',
-        max_tokens=6000,
-        tools=[{
-            'type': 'web_search_20250305',
-            'name': 'web_search',
-            'max_uses': 8,
-        }],
+        model='claude-haiku-4-5-20251001',  # web_search 안 쓰니 Haiku로 충분
+        max_tokens=3500,
         messages=[{'role': 'user', 'content': prompt}],
     )
     print(f'  stop_reason={response.stop_reason}', flush=True)
@@ -138,25 +234,22 @@ def curate_news() -> dict:
         raise RuntimeError('Claude 응답에 text 블록 없음')
     final_text = text_blocks[-1].text.strip()
 
-    # 코드 펜스가 있으면 제거
     if final_text.startswith('```'):
         final_text = re.sub(r'^```(?:json)?\s*\n', '', final_text)
         final_text = re.sub(r'\n```\s*$', '', final_text)
 
-    # JSON 파싱
     try:
         return json.loads(final_text)
-    except json.JSONDecodeError as e:
-        # 첫 { 부터 마지막 } 까지만 추출 시도
+    except json.JSONDecodeError:
         start = final_text.find('{')
         end = final_text.rfind('}')
         if start >= 0 and end > start:
             return json.loads(final_text[start:end + 1])
-        raise RuntimeError(f'JSON 파싱 실패: {e}\n원본: {final_text[:500]}')
+        raise RuntimeError(f'JSON 파싱 실패. 원본: {final_text[:500]}')
 
 
 # ----------------------------------------------------------------------------
-# 2) JSON → HTML 뉴스레터 (Gmail iOS 다크모드 최적화 템플릿)
+# 3) JSON → HTML 뉴스레터 (Gmail iOS 다크모드 최적화)
 # ----------------------------------------------------------------------------
 
 def html_escape(s: str) -> str:
@@ -197,7 +290,13 @@ def build_html(news_data: dict, today_kor: str) -> str:
 <tr><td bgcolor="#ffffff" style="background:#ffffff;padding:24px 20px 8px;">
 <h2 style="margin:0 0 16px;font-size:20px;font-weight:700;color:#0f172a;border-bottom:3px solid {color};padding-bottom:8px;display:inline-block;">{title}</h2>
 </td></tr>""")
-        for item in cat.get('items', []):
+        items = cat.get('items', [])
+        if not items:
+            parts.append(f"""
+<tr><td bgcolor="#ffffff" style="background:#ffffff;padding:0 20px 12px;">
+<p style="margin:0;font-size:14px;color:#94a3b8;font-style:italic;">최근 3일 이내 해당 주제의 주요 뉴스가 없습니다.</p>
+</td></tr>""")
+        for item in items:
             t = html_escape(item.get('title', ''))
             s = html_escape(item.get('summary', ''))
             src = html_escape(item.get('source', ''))
@@ -229,7 +328,7 @@ def build_html(news_data: dict, today_kor: str) -> str:
 
 
 # ----------------------------------------------------------------------------
-# 3) Gmail SMTP 발송
+# 4) Gmail SMTP 발송
 # ----------------------------------------------------------------------------
 
 def send_gmail(html_body: str, today_kor: str) -> None:
@@ -251,11 +350,10 @@ def send_gmail(html_body: str, today_kor: str) -> None:
 
 
 # ----------------------------------------------------------------------------
-# 4) 카카오톡 "나에게 보내기" (REST API)
+# 5) 카카오톡 "나에게 보내기" — 단순 알림 (버튼 없음)
 # ----------------------------------------------------------------------------
 
 def refresh_kakao_token() -> tuple[str, str | None]:
-    """access_token 발급. (access, new_refresh or None)."""
     rest_key = os.environ['KAKAO_REST_API_KEY']
     secret = os.environ['KAKAO_CLIENT_SECRET']
     refresh_token = os.environ['KAKAO_REFRESH_TOKEN']
@@ -277,7 +375,6 @@ def refresh_kakao_token() -> tuple[str, str | None]:
     access = data['access_token']
     new_refresh = data.get('refresh_token')
     if new_refresh:
-        # GitHub Secrets는 자동 갱신 불가 → 사용자가 수동 업데이트할 수 있도록 로그 출력
         print(
             f'  ⚠️ Kakao refresh_token 이 회전됐습니다. '
             f'GitHub → Settings → Secrets → KAKAO_REFRESH_TOKEN 을 새 값으로 업데이트하세요. '
@@ -290,9 +387,8 @@ def refresh_kakao_token() -> tuple[str, str | None]:
 def send_kakao(message: str) -> None:
     access_token, _ = refresh_kakao_token()
 
-    # 카카오 text 템플릿은 link 필드가 필수.
+    # 카카오 text 템플릿은 link 필드가 필수 (등록된 도메인이어야 함).
     # button_title 을 생략하면 버튼이 표시되지 않아 깔끔한 알림이 됨.
-    # link.web_url 은 카카오 콘솔에 등록된 도메인이어야 함.
     template_object = {
         'object_type': 'text',
         'text': message,
@@ -323,27 +419,23 @@ def main() -> int:
     today_kor = kst_today_kor()
     print(f'\n📰 {today_kor} 뉴스레터 시작\n' + '=' * 50, flush=True)
 
-    # 1. 큐레이션
+    # 1. RSS 수집 + Claude 큐레이션
     try:
         news_data = curate_news()
         total = sum(len(c.get('items', [])) for c in news_data.get('categories', []))
-        print(f'  ✅ 뉴스 {total}건 수집 완료', flush=True)
+        print(f'  ✅ 뉴스 {total}건 큐레이션 완료', flush=True)
     except Exception as e:
         print(f'  ❌ 뉴스 큐레이션 실패: {e}', flush=True)
         return 1
 
-    # 1-b. 날짜 범위 검증 (3일 이내인지 안전망 체크)
-    valid_from = three_days_ago_iso()
+    # 1-b. 날짜 안전망 검증
+    valid_from = (datetime.now(KST) - timedelta(days=DAYS_WINDOW)).strftime('%Y-%m-%d')
     valid_to = today_iso()
     out_of_range = []
     for cat in news_data.get('categories', []):
         for item in cat.get('items', []):
             d = item.get('date', '')
-            # YYYY-MM-DD 형식이어야만 비교
-            if not re.match(r'^\d{4}-\d{2}-\d{2}$', d):
-                out_of_range.append((cat.get('title', ''), item.get('title', ''), d))
-                continue
-            if d < valid_from or d > valid_to:
+            if not re.match(r'^\d{4}-\d{2}-\d{2}$', d) or d < valid_from or d > valid_to:
                 out_of_range.append((cat.get('title', ''), item.get('title', ''), d))
     if out_of_range:
         print(f'  ⚠️ 날짜 범위({valid_from} ~ {valid_to}) 벗어난 기사 {len(out_of_range)}건:', flush=True)
@@ -362,7 +454,7 @@ def main() -> int:
     except Exception as e:
         print(f'  ❌ Gmail 실패: {e}', flush=True)
 
-    # 4. 카카오톡 발송
+    # 4. 카카오톡 알림 (버튼 없는 단순 알림)
     kakao_ok = False
     try:
         kakao_msg = '☀️ 오늘의 뉴스레터가 도착했어요!\n\n📧 지메일 앱을 열어 확인해주세요.'
@@ -371,7 +463,6 @@ def main() -> int:
     except Exception as e:
         print(f'  ❌ 카카오톡 실패: {e}', flush=True)
 
-    # 5. 최종 보고
     print('\n' + '=' * 50)
     print(f'📧 Gmail: {"✅" if gmail_ok else "❌"}')
     print(f'💬 KakaoTalk: {"✅" if kakao_ok else "❌"}')
