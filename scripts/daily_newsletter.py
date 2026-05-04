@@ -35,6 +35,63 @@ def today_iso() -> str:
 # 1) RSS 카테고리별 검색 쿼리 정의
 # ----------------------------------------------------------------------------
 
+# 화이트리스트: 한국 주요 매체 20곳 + 미국 주요 매체 20곳
+# Google News RSS의 source 필드(매체명) 안에 아래 키워드 중 하나라도
+# 부분 매칭되면 통과. (대소문자 무시)
+ALLOWED_SOURCE_PATTERNS = [
+    # 🇰🇷 한국 (20)
+    '연합뉴스', 'Yonhap',
+    'KBS',
+    'MBC',
+    'SBS',
+    'YTN',
+    'JTBC',
+    '조선일보', 'Chosun',
+    '중앙일보', 'JoongAng',
+    '동아일보', 'Dong-A', 'Donga',
+    '한겨레', 'Hankyoreh',
+    '경향신문', 'Kyunghyang',
+    '한국일보', 'Hankook Ilbo',
+    '매일경제', 'Maeil Business', 'mk.co.kr',
+    '한국경제', 'Hankyung',
+    '헤럴드경제', 'Heraldcorp',
+    '서울경제', 'Sedaily',
+    '머니투데이', 'MoneyToday',
+    'Korea Herald',
+    'Korea Times',
+    '오마이뉴스', 'OhmyNews',
+    # 🇺🇸 미국 (20)
+    'Associated Press', 'AP News',
+    'Reuters',
+    'New York Times', 'Nytimes',
+    'Washington Post',
+    'Wall Street Journal', 'WSJ',
+    'USA Today',
+    'Los Angeles Times', 'LATimes',
+    'CNN',
+    'NBC News',
+    'ABC News',
+    'CBS News',
+    'PBS NewsHour',
+    'Bloomberg',
+    'CNBC',
+    'Financial Times',
+    'Politico',
+    'Axios',
+    'ProPublica',
+    'The Atlantic',
+    'Time Magazine',
+]
+
+
+def is_allowed_source(source: str) -> bool:
+    """매체명이 화이트리스트(한국 20 + 미국 20)에 속하는지 검사."""
+    if not source:
+        return False
+    s = source.strip().lower()
+    return any(kw.lower() in s for kw in ALLOWED_SOURCE_PATTERNS)
+
+
 CATEGORY_DEFS = [
     {
         'key': 'domestic',
@@ -90,7 +147,7 @@ def google_news_rss_url(query: str, lang: str = 'ko') -> str:
     return f'https://news.google.com/rss/search?q={quote(query)}&hl=ko&gl=KR&ceid=KR:ko'
 
 
-def fetch_rss_items(url: str, max_items: int = 20) -> list[dict]:
+def fetch_rss_items(url: str, max_items: int = 40) -> list[dict]:
     """RSS 피드를 받아 표준화된 item 목록을 반환."""
     try:
         feed = feedparser.parse(url)
@@ -152,10 +209,13 @@ def collect_candidates() -> list[dict]:
         # 3일 이내 필터
         recent = [i for i in all_items if i['pub_dt'] >= cutoff]
 
+        # 매체 화이트리스트 필터 (한국 20 + 미국 20만 통과)
+        allowed = [i for i in recent if is_allowed_source(i['source'])]
+
         # 제목 앞부분 기준 중복 제거 (다른 매체가 같은 사건 다룬 경우)
         seen = set()
         unique = []
-        for item in sorted(recent, key=lambda x: x['pub_dt'], reverse=True):
+        for item in sorted(allowed, key=lambda x: x['pub_dt'], reverse=True):
             key = re.sub(r'\s+', ' ', item['title'])[:40]
             if key in seen:
                 continue
@@ -163,7 +223,11 @@ def collect_candidates() -> list[dict]:
             unique.append(item)
 
         top = unique[:8]  # Claude한테 최대 8개 후보 전달
-        print(f'  {cat["title"]}: {len(top)} 후보 (전체 {len(all_items)} → 3일 이내 {len(recent)})', flush=True)
+        print(
+            f'  {cat["title"]}: {len(top)} 후보 '
+            f'(전체 {len(all_items)} → 3일 이내 {len(recent)} → 화이트리스트 {len(allowed)})',
+            flush=True,
+        )
 
         result.append({
             'key': cat['key'],
@@ -207,7 +271,7 @@ def curate_news() -> dict:
 
 # 절대 규칙 (위반 = 작업 실패)
 1. **title / source / date / url 은 위 후보 데이터에서 글자 그대로 복사**. 한 글자도 수정/생성 금지.
-2. **summary 만 너가 한국어로 새로 작성** (50~120자, 1~2줄, 핵심만 간결히).
+2. **summary 만 너가 한국어로 새로 작성** — 반드시 **정확히 2문장**, 총 100~200자. 첫 문장은 핵심 사실, 두 번째 문장은 배경·맥락·의미. 단순 헤드라인 반복 금지.
 3. **후보가 3건 이상인 카테고리는 반드시 정확히 3건 선정**. 거르지 말 것.
 4. 후보가 1~2건뿐이면 있는 만큼만 출력. 후보가 정말 0건이어야만 `"items": []`.
 5. 모든 4개 카테고리(domestic, tech, ai, finance)를 정의된 순서대로 출력.
@@ -241,7 +305,7 @@ def curate_news() -> dict:
     print('Calling Claude (Haiku) for curation…', flush=True)
     response = client.messages.create(
         model='claude-haiku-4-5-20251001',  # web_search 안 쓰니 Haiku로 충분
-        max_tokens=6000,
+        max_tokens=8000,
         messages=[{'role': 'user', 'content': prompt}],
     )
     print(f'  stop_reason={response.stop_reason}', flush=True)
