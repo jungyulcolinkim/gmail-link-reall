@@ -2,8 +2,9 @@ name: Daily Newsletter
 
 on:
   schedule:
-    # 한국시간 매일 오전 7시 = UTC 22시 (전날)
-    - cron: '0 22 * * *'
+    # GitHub Actions cron은 정각(:00)에 부하가 몰려 지연·누락되므로
+    # 한국시간 06:50 (UTC 21:50)로 당겨서 7시 전후 도착하도록 함.
+    - cron: '50 21 * * *'
   workflow_dispatch:  # 수동 실행 허용
 
 jobs:
